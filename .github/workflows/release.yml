@@ -4,6 +4,11 @@ name: Release
 # and the embedding SDKs) on macOS, Linux and Windows, and publishes it as a
 # GitHub release.
 #
+# Its parts build in parallel jobs (`cargo xtask dist --part`): each OS's
+# native runtimes, the iOS runtimes and SDK (macOS), and once for all three
+# the web and Android runtimes, the same files wherever they are built. The
+# `package` jobs then merge each OS's archive from its parts.
+#
 # - Pushing a tag `vX.Y.Z` (the workspace version in Cargo.toml) builds every
 #   platform and, once all of them have built, creates a draft release with
 #   their archives; publish it from the releases page.
@@ -56,16 +61,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The iOS runtimes and SDK need Xcode; the macOS runtime is built
-          # for this machine (Apple silicon).
+          # The macOS runtime is built for this machine (Apple silicon).
           - name: macos-arm64
+            part: native
             os: macos-15
           # 24.04 has GTK 4.14 and Pango 1.52+, what the Linux runtime needs;
           # its binaries need glibc 2.39 and GTK 4.14 or newer where they run.
           - name: linux-x86_64
+            part: native
             os: ubuntu-24.04
           - name: windows-x86_64
+            part: native
             os: windows-latest
+          # The iOS runtimes and SDK need Xcode.
+          - name: ios
+            part: ios
+            os: macos-15
+          # The web and Android runtimes, for every OS's archive.
+          - name: shared
+            part: shared
+            os: ubuntu-24.04
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -87,7 +102,6 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/tmp"
           echo "TMPDIR=$RUNNER_TEMP/tmp" >> "$GITHUB_ENV"
-          echo "ARCHIVE=nsh-${{ matrix.name }}" >> "$GITHUB_ENV"
 
       - name: Set up Windows
         if: runner.os == 'Windows'
@@ -101,7 +115,7 @@ jobs:
       # the GPUI runtime X11, Wayland, xkbcommon, fontconfig and FreeType,
       # GTK 3 and WebKitGTK 4.1 (web views) and GStreamer (videos).
       - name: Install clang, GTK 4 and GPUI's libraries
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.part == 'native'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang llvm libclang-dev libgtk-4-dev libwebkitgtk-6.0-dev \
@@ -109,13 +123,25 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libzstd-dev libgtk-3-dev libwebkit2gtk-4.1-dev \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
+      # QuickJS is C, also for WebAssembly: its build needs upstream clang
+      # and `llvm-ar`.
+      - name: Install clang
+        if: matrix.part == 'shared'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libclang-dev
+          echo "CC_wasm32_unknown_unknown=/usr/bin/clang" >> "$GITHUB_ENV"
+          echo "AR_wasm32_unknown_unknown=/usr/bin/llvm-ar" >> "$GITHUB_ENV"
+
       # The Android runtime: `javac` + `d8` (Java 17), the SDK's
       # `platforms;android-35` and an NDK (the images have the SDK and NDKs).
       - uses: actions/setup-java@v4
+        if: matrix.part == 'shared'
         with:
           distribution: temurin
           java-version: "17"
       - name: Install the Android platform
+        if: matrix.part == 'shared'
         run: |
           if [[ ! -f "$ANDROID_HOME/platforms/android-35/android.jar" ]]; then
             sdkmanager=$(ls "$ANDROID_HOME"/cmdline-tools/latest/bin/sdkmanager* | head -1)
@@ -127,92 +153,24 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: ${{ matrix.part == 'shared' && 'wasm32-unknown-unknown' || '' }}
 
-      # QuickJS's WebAssembly build needs upstream LLVM: Apple's clang
-      # does not target wasm32. Check the C tools before building runtimes.
-      - name: Set up WebAssembly C tools
-        run: |
-          suffix=""
-          if [[ "$RUNNER_OS" == macOS ]]; then
-            brew list llvm > /dev/null 2>&1 || brew install llvm
-            llvm_bin="$(brew --prefix llvm)/bin"
-          elif [[ "$RUNNER_OS" == Windows ]]; then
-            llvm_bin="C:/Program Files/LLVM/bin"
-            suffix=".exe"
-          else
-            llvm_bin=/usr/bin
-          fi
-          cc="$llvm_bin/clang$suffix"
-          ar="$llvm_bin/llvm-ar$suffix"
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            # rquickjs-sys canonicalizes its vendored WASI include directory
-            # to a verbatim Windows path. Give clang ordinary drive paths
-            # so nested includes such as bits/alltypes.h resolve correctly.
-            cat > "$RUNNER_TEMP/nsh-wasm-clang.py" <<'PYTHON'
-          import os
-          import subprocess
-          import sys
-
-          def normalize(argument):
-              for prefix in ("-isystem", "-I", "-L", ""):
-                  marker = prefix + "\\\\?\\"
-                  if argument.startswith(marker):
-                      path = argument[len(marker):]
-                      if len(path) > 2 and path[1:3] == ":\\":
-                          return prefix + path.replace("\\", "/")
-              return argument
-
-          if __name__ == "__main__":
-              sys.exit(subprocess.call([os.environ["NSH_WASM_CLANG"], *map(normalize, sys.argv[1:])]))
-          PYTHON
-            printf '@echo off\r\npython "%%~dp0nsh-wasm-clang.py" %%*\r\n' > "$RUNNER_TEMP/nsh-wasm-clang.cmd"
-            export NSH_WASM_CLANG="$cc"
-            echo "NSH_WASM_CLANG=$cc" >> "$GITHUB_ENV"
-            cc="$(cygpath -m "$RUNNER_TEMP")/nsh-wasm-clang.cmd"
-          fi
-          printf 'int nsh_wasm_probe(void) { return 0; }\n' | \
-            "$cc" --target=wasm32-unknown-unknown -x c -c - -o "$RUNNER_TEMP/wasm-probe.o"
-          "$ar" rcs "$RUNNER_TEMP/wasm-probe.a" "$RUNNER_TEMP/wasm-probe.o"
-          echo "CC_wasm32_unknown_unknown=$cc" >> "$GITHUB_ENV"
-          echo "AR_wasm32_unknown_unknown=$ar" >> "$GITHUB_ENV"
-
+      # Dependencies only (the workspace's own crates are always rebuilt),
+      # one cache per job: their targets and features differ.
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-release-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-release-cargo-
-
-      # Compile the actual WASI headers before the native runtimes: a bare
-      # clang probe does not exercise rquickjs-sys's vendored include path.
-      - name: Check the Windows web runtime
-        if: runner.os == 'Windows'
-        run: |
-          cargo metadata --locked --format-version 1 --filter-platform wasm32-unknown-unknown > "$RUNNER_TEMP/wasm-metadata.json"
-          python - "$RUNNER_TEMP/wasm-metadata.json" <<'PYTHON'
-          import json
-          import pathlib
-          import sys
-          packages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["packages"]
-          package = next(p for p in packages if p["name"] == "rquickjs-sys")
-          include = pathlib.Path(package["manifest_path"]).parent / "vendor/wasi-libc/include"
-          for name in ("stdlib.h", "bits/alltypes.h"):
-              header = include / name
-              if not header.is_file():
-                  sys.exit(f"Missing vendored WASI header: {header}")
-              print(f"Verified WASI header: {header}")
-          PYTHON
-          cargo build --profile web -p nsh-platform-web --target wasm32-unknown-unknown --features bytecode-only
+          key: release-${{ matrix.name }}
+          workspaces: |
+            . -> target
+            crates/gpui -> target
 
       - name: Build the distribution
-        run: cargo xtask dist -v
+        run: cargo xtask dist --part ${{ matrix.part }} -v
 
       # The packaged CLI makes and bundles a new app.
       - name: Smoke test
+        if: matrix.part == 'native'
         run: |
           nsh=dist/nsh/bin/nsh
           [[ "$RUNNER_OS" != Windows ]] || nsh=dist/nsh/bin/nsh.exe
@@ -221,44 +179,76 @@ jobs:
           "$nsh" init "$app"
           "$nsh" build "$app" -o "$RUNNER_TEMP/smoke-out" --release
           ls "$RUNNER_TEMP/smoke-out"
+
+      # A tar keeps the executable bits and the frameworks' symbolic links,
+      # which artifacts lose.
+      - name: Archive the part
+        run: |
+          [[ "${{ matrix.part }}" != native ]] || cp README.md LICENSE-APACHE dist/nsh/
           find dist/nsh -type f | sort
+          tar -cf "$RUNNER_TEMP/part.tar" -C dist nsh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-${{ matrix.name }}
+          path: ${{ runner.temp }}/part.tar
+          if-no-files-found: error
+
+  package:
+    name: package (${{ matrix.name }})
+    needs: dist
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [macos-arm64, linux-x86_64, windows-x86_64]
+    runs-on: ubuntu-latest
+    env:
+      ARCHIVE: nsh-${{ matrix.name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: part-*
+          path: parts
 
       - name: Package
         run: |
-          mkdir -p target/release-assets
-          cd target/release-assets
-          cp -R ../../dist/nsh nsh
-          cp ../../README.md ../../LICENSE-APACHE nsh/
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            7z a -tzip "$ARCHIVE.zip" nsh > /dev/null
+          mkdir -p assets
+          cd assets
+          for part in "${{ matrix.name }}" shared; do
+            tar -xf "../parts/part-$part/part.tar"
+          done
+          [[ "${{ matrix.name }}" != macos-arm64 ]] || tar -xf ../parts/part-ios/part.tar
+          find nsh -type f | sort
+          if [[ "${{ matrix.name }}" == windows-x86_64 ]]; then
+            zip -qry "$ARCHIVE.zip" nsh
             sha256sum "$ARCHIVE.zip" > "$ARCHIVE.zip.sha256"
           else
             tar -czf "$ARCHIVE.tar.gz" nsh
-            shasum -a 256 "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
+            sha256sum "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
           fi
           # The embedding SDKs on their own, for native apps that embed nsh
-          # and need no CLI (iOS from macOS, Android from Linux).
+          # and need no CLI (iOS with macOS's archive, Android with Linux's).
           embed() {
             local name="nsh-embed-$1"
             mkdir -p "$name"
             cp -R "nsh/embed/$1/." "$name/"
             zip -qry "$name.zip" "$name"
-            shasum -a 256 "$name.zip" > "$name.zip.sha256"
+            sha256sum "$name.zip" > "$name.zip.sha256"
           }
-          [[ "$RUNNER_OS" != macOS ]] || embed ios
-          [[ "$RUNNER_OS" != Linux ]] || embed android
+          [[ "${{ matrix.name }}" != macos-arm64 ]] || embed ios
+          [[ "${{ matrix.name }}" != linux-x86_64 ]] || embed android
           rm -rf nsh nsh-embed-*/
           ls -l
 
       - uses: actions/upload-artifact@v4
         with:
           name: nsh-${{ matrix.name }}
-          path: target/release-assets/*
+          path: assets/*
           if-no-files-found: error
 
   release:
     name: Release
-    needs: dist
+    needs: package
     if: inputs.tag != '' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
