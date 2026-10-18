@@ -25,10 +25,15 @@
 //! built for this machine on each of the three. The web runtime is built
 //! everywhere: it needs a clang that targets wasm32 and `llvm-ar`
 //! (`docs/dev/web.md`).
+//!
+//! `--part` builds some of it: [`Part::Native`] (what only this machine
+//! builds), [`Part::Ios`] and [`Part::Shared`] (the same files on every
+//! machine). The release workflow builds them in jobs of their own and
+//! merges each machine's archive from them.
 
 use std::{env, fs, path::Path, process::Command};
 
-use anyhow::Context as _;
+use anyhow::{Context as _, bail};
 
 use crate::{android, term};
 
@@ -36,7 +41,25 @@ const IOS: &str = "aarch64-apple-ios";
 const IOS_SIM: &str = "aarch64-apple-ios-sim";
 const CATALYST: &str = "aarch64-apple-ios-macabi";
 
-pub(crate) fn dist() -> anyhow::Result<()> {
+/// A part of the distribution.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum Part {
+    /// The CLI and this machine's desktop runtimes (macOS, Linux or
+    /// Windows, and GPUI).
+    Native,
+    /// The iOS runtimes and the iOS embedding SDK (macOS only).
+    Ios,
+    /// The web and Android runtimes and the Android embedding SDK: the same
+    /// files whichever machine builds them.
+    Shared,
+}
+
+/// Builds `parts` of the distribution (all of them when empty).
+pub(crate) fn dist(parts: &[Part]) -> anyhow::Result<()> {
+    let part = |p: Part| parts.is_empty() || parts.contains(&p);
+    if parts.contains(&Part::Ios) && !cfg!(target_os = "macos") {
+        bail!("the iOS runtimes and SDK are built on macOS only");
+    }
     let root = android::root();
     let out = root.join("dist/nsh");
     if out.exists() {
@@ -44,6 +67,25 @@ pub(crate) fn dist() -> anyhow::Result<()> {
     }
     let release = root.join("target");
 
+    if part(Part::Native) {
+        native_runtimes(&release, &out)?;
+    }
+    if cfg!(target_os = "macos") && part(Part::Ios) {
+        ios_runtimes(&release, &out)?;
+        // iOS embedding: a static framework per platform (Rust + the Swift
+        // module) in an XCFramework.
+        crate::ios::xcframeworks(&out.join("embed/ios"), &out.join("work"))?;
+        fs::remove_dir_all(out.join("work"))?;
+    }
+    if part(Part::Shared) {
+        shared_runtimes(&root, &release, &out)?;
+    }
+    term::note(out.strip_prefix(&root).unwrap_or(&out).display());
+    Ok(())
+}
+
+/// The CLI and this machine's desktop runtimes.
+fn native_runtimes(release: &Path, out: &Path) -> anyhow::Result<()> {
     // The CLI for this machine.
     cargo(&["build", "--release", "-p", "nsh-cli"], "nsh")?;
     copy(
@@ -52,7 +94,6 @@ pub(crate) fn dist() -> anyhow::Result<()> {
     )?;
 
     if cfg!(target_os = "macos") {
-        ios_runtimes(&release, &out)?;
         for (package, what) in [
             ("nsh-macos-host", "the development host for macOS"),
             ("nsh-macos-app", "the release runner for macOS"),
@@ -133,7 +174,11 @@ pub(crate) fn dist() -> anyhow::Result<()> {
             )?;
         }
     }
+    Ok(())
+}
 
+/// The web and Android runtimes, the Android embedding SDK.
+fn shared_runtimes(root: &Path, release: &Path, out: &Path) -> anyhow::Result<()> {
     // The web runtimes: the same files on every machine. Published apps'
     // (no QuickJS parser: bytecode only) and the development host's (JS
     // source and hot updates). Both build to the same file, copied in turn.
@@ -142,7 +187,7 @@ pub(crate) fn dist() -> anyhow::Result<()> {
         (&[][..], "nsh-dev.wasm"),
     ] {
         let mut web = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-        web.current_dir(&root)
+        web.current_dir(root)
             .args(["build", "--profile", "web", "-p", "nsh-platform-web"])
             .args(features)
             .args(["--target", "wasm32-unknown-unknown"]);
@@ -186,17 +231,10 @@ pub(crate) fn dist() -> anyhow::Result<()> {
         make_aar(&built, &abis, dev, &aar)?;
         term::done(format!(
             "packed {}",
-            aar.strip_prefix(&root).unwrap_or(&aar).display()
+            aar.strip_prefix(root).unwrap_or(&aar).display()
         ));
     }
 
-    if cfg!(target_os = "macos") {
-        // iOS embedding: a static framework per platform (Rust + the Swift
-        // module) in an XCFramework.
-        crate::ios::xcframeworks(&out.join("embed/ios"), &out.join("work"))?;
-        fs::remove_dir_all(out.join("work"))?;
-    }
-    term::note(out.strip_prefix(&root).unwrap_or(&out).display());
     Ok(())
 }
 

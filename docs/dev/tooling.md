@@ -301,10 +301,12 @@ the `web` profile, into `target/wasm32-unknown-unknown/web/`.
 
 ## Releases
 
-`.github/workflows/release.yml` runs `cargo xtask dist` on macOS (Apple silicon: the iOS, Mac Catalyst and macOS
-runtimes and the iOS SDK), Linux and Windows (x86_64), each with the GPUI runtime of its OS and the Android runtime, checks that the packaged CLI
-makes and bundles a new app, and archives `dist/nsh` as one directory `nsh/` in `nsh-<platform>.tar.gz` (`.zip` on
-Windows), plus the embedding SDKs alone (`nsh-embed-ios.zip`, `nsh-embed-android.zip`), each with a `.sha256`. Asset
+`.github/workflows/release.yml` builds the distribution in parts, in parallel jobs (`cargo xtask dist --part`):
+`native` on macOS (Apple silicon: the macOS runtime), Linux and Windows (x86_64), each with the GPUI runtime of its
+OS, checking that the packaged CLI makes and bundles a new app; `ios` on macOS (the iOS and Mac Catalyst runtimes and
+the iOS SDK); and `shared` once, on Linux (the web and Android runtimes, the same files on every OS). A `package` job
+per OS merges its parts (macOS's with `ios`, all with `shared`) into one directory `nsh/`, laid out as `dist/nsh`, in
+`nsh-<platform>.tar.gz` (`.zip` on Windows), plus the embedding SDKs alone (`nsh-embed-ios.zip`, `nsh-embed-android.zip`), each with a `.sha256`. Asset
 names carry no version, so `releases/latest/download/<asset>` always resolves; the installers and package managers
 rely on that. To release, set `version` in the root `Cargo.toml`, push the tag `v<version>` (a tag that does not
 match fails the run) and publish the draft release the run creates once every platform has built. Running the
