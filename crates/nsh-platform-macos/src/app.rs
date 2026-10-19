@@ -3,6 +3,7 @@
 
 use std::{
     cell::RefCell,
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, RwLock},
 };
@@ -14,9 +15,10 @@ use objc2::{
     runtime::ProtocolObject, sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAutoresizingMaskOptions,
-    NSBackingStoreType, NSEventModifierFlags, NSMenu, NSMenuItem, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSApplicationTerminateReply, NSAutoresizingMaskOptions, NSBackingStoreType, NSEvent,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSView, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -65,10 +67,16 @@ pub struct AppOptions {
     /// Where bundled assets are (for [`AppSource::Bundle`]); dev servers
     /// serve them themselves.
     pub asset_base: Option<AssetBase>,
+    /// The application id (`com.example.app`).
+    pub app_id: String,
     /// The window title.
     pub title: String,
     /// The initial window size in points.
     pub size: (i32, i32),
+    /// Hides the standalone window on close while retaining its engine.
+    /// Reopening from the Dock shows the same window. Quit still stops the app.
+    /// Only used by [`run_app`]; defaults to false.
+    pub keep_alive_on_close: bool,
     /// Steps run once the window shows (`wait 500; shot a.png; tap 10 20;
     /// quit`): for checking a backend change without touching the screen.
     /// See [`crate::script`].
@@ -89,6 +97,14 @@ pub struct AppOptions {
     /// release runner run apps on their own, with
     /// [`Limits::standalone_desktop`].
     pub limits: Limits,
+    /// Where the apps it runs keep their data, each in `<dir>/<app id>`
+    /// (`nsh.json` `"id"`, which travels with the bundle): `None` uses the
+    /// system's data directory ([`nsh_engine::data_dir`]); an app that
+    /// embeds nsh gives its own (its data directory + `/nsh`, say).
+    pub data_dir: Option<PathBuf>,
+    /// The apps' storage (`nsh/storage`), overriding the `storage.json` in
+    /// their directory of [`data_dir`](Self::data_dir).
+    pub storage: Option<Arc<dyn nsh_engine::StorageBackend>>,
 }
 
 impl Default for AppOptions {
@@ -96,13 +112,17 @@ impl Default for AppOptions {
         AppOptions {
             trace: false,
             asset_base: None,
+            app_id: "com.longbridge.nsh.host".to_owned(),
             title: "nsh".to_owned(),
             size: (1200, 800),
+            keep_alive_on_close: false,
             script: None,
             components: Default::default(),
             appearance: Appearance::System,
             fps: false,
             limits: Limits::default(),
+            data_dir: None,
+            storage: None,
         }
     }
 }
@@ -200,6 +220,8 @@ impl AppView {
             limits: options.limits,
             ui_sets: ui_sets(),
             runtime: None,
+            data_dir: options.data_dir.clone().or_else(nsh_engine::data_dir),
+            storage: options.storage.clone(),
         };
         crate::image::set_asset_base(&self.surface, options.asset_base.clone());
         self.surface
@@ -274,6 +296,7 @@ fn initial_environment() -> Environment {
 struct Running {
     window: Retained<NSWindow>,
     view: Rc<AppView>,
+    keep_alive_on_close: bool,
 }
 
 thread_local! {
@@ -292,7 +315,31 @@ define_class!(
     unsafe impl NSApplicationDelegate for Delegate {
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window_closed(&self, _app: &NSApplication) -> bool {
-            true
+            false
+        }
+
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn should_terminate(&self, app: &NSApplication) -> NSApplicationTerminateReply {
+            finish_running(app);
+            // The caller owns process termination after run_app returns.
+            NSApplicationTerminateReply::TerminateCancel
+        }
+
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn should_handle_reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
+            let window = RUNNING.with(|running| {
+                running
+                    .borrow()
+                    .as_ref()
+                    .map(|running| running.window.clone())
+            });
+            if let Some(window) = window {
+                if window.isMiniaturized() {
+                    window.deminiaturize(None);
+                }
+                window.makeKeyAndOrderFront(None);
+            }
+            false
         }
 
         #[unsafe(method(applicationWillTerminate:))]
@@ -302,20 +349,81 @@ define_class!(
     }
 
     unsafe impl NSWindowDelegate for Delegate {
+        #[unsafe(method(windowShouldClose:))]
+        fn should_close(&self, window: &NSWindow) -> bool {
+            let keep_alive = RUNNING.with(|running| {
+                running
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|running| running.keep_alive_on_close)
+            });
+            if keep_alive {
+                window.orderOut(None);
+            }
+            !keep_alive
+        }
+
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _notification: &NSNotification) {
             stop_running();
-            // AppKit ends the app after its last window closes only if the
-            // window was on screen: not a minimized one. The app ends with
-            // its window either way (once the close is done).
+            // Leave AppKit's close callback before stopping its event loop,
+            // including when the window closed while minimized.
             dispatch2::DispatchQueue::main().exec_async(|| {
                 if let Some(mtm) = MainThreadMarker::new() {
-                    NSApplication::sharedApplication(mtm).terminate(None);
+                    finish_running(&NSApplication::sharedApplication(mtm));
                 }
             });
         }
     }
 );
+
+/// Quits the standalone runner, including a retained hidden window.
+/// Stops its engine and returns from [`run_app`]. May be called from any thread;
+/// the request is dispatched to AppKit's main thread. With no standalone runner
+/// this has no effect; embedded hosts own their application lifecycle.
+pub fn quit_app() {
+    dispatch2::DispatchQueue::main().exec_async(|| {
+        if RUNNING.with(|running| running.borrow().is_some())
+            && let Some(mtm) = MainThreadMarker::new()
+        {
+            finish_running(&NSApplication::sharedApplication(mtm));
+        }
+    });
+}
+
+/// Ends the standalone event loop, returning process ownership to its caller.
+fn finish_running(app: &NSApplication) {
+    let window = RUNNING.with(|running| {
+        running
+            .borrow()
+            .as_ref()
+            .map(|running| running.window.clone())
+    });
+    if let Some(window) = window {
+        // Quit has no window-close callback yet. Close without re-entering
+        // this delegate, and keep the window alive until close returns.
+        window.setDelegate(None);
+        window.close();
+    }
+    stop_running();
+    app.stop(None);
+    // stop: takes effect after the next event. A close can arrive through a
+    // dispatch block rather than an AppKit event, so wake nextEventMatchingMask
+    // explicitly instead of waiting for the user to move the mouse.
+    if let Some(event) = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+        NSEventType::ApplicationDefined,
+        NSPoint::new(0.0, 0.0),
+        NSEventModifierFlags::empty(),
+        0.0,
+        0,
+        None,
+        0,
+        0,
+        0,
+    ) {
+        app.postEvent_atStart(&event, true);
+    }
+}
 
 /// Stops the standalone app's engine (its window closes).
 fn stop_running() {
@@ -350,7 +458,9 @@ fn name_app(name: &str) {
 }
 
 /// Runs `source` in a window until it is closed. Must be called on the
-/// main thread.
+/// main thread. By default closing the window stops the engine and returns;
+/// `keep_alive_on_close` retains the same engine until Quit or [`quit_app`].
+/// The caller can finish cleanup or relaunch after this function returns.
 pub fn run_app(source: AppSource, options: AppOptions) -> std::process::ExitCode {
     let mtm = MainThreadMarker::new().expect("run_app must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -400,8 +510,16 @@ pub fn run_app(source: AppSource, options: AppOptions) -> std::process::ExitCode
     if let Some(script) = &options.script {
         crate::script::run(&window, view.surface().clone(), script);
     }
-    RUNNING.with(|r| *r.borrow_mut() = Some(Running { window, view }));
+    RUNNING.with(|r| {
+        *r.borrow_mut() = Some(Running {
+            window,
+            view,
+            keep_alive_on_close: options.keep_alive_on_close,
+        })
+    });
     app.run();
+    stop_running();
+    app.setDelegate(None);
     drop(delegate);
     std::process::ExitCode::SUCCESS
 }

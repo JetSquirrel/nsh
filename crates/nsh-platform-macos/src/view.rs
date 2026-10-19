@@ -35,11 +35,13 @@ use nsh_core::{
 };
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
-    rc::Retained, runtime::AnyObject,
+    rc::Retained,
+    runtime::{AnyObject, ProtocolObject},
 };
 use objc2_app_kit::{
-    NSEvent, NSEventType, NSResponder, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSViewLayerContentsRedrawPolicy, NSWindowOrderingMode,
+    NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventType, NSResponder,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSViewLayerContentsRedrawPolicy,
+    NSWindowOrderingMode,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
@@ -404,6 +406,51 @@ define_class!(
 
     unsafe impl NSObjectProtocol for ViewObj {}
 
+    // SAFETY: AppKit invokes these SDK-typed callbacks on the main thread.
+    unsafe impl NSDraggingDestination for ViewObj {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.ivars().surface.borrow().upgrade().map_or(NSDragOperation::None, |surface| {
+                crate::file_drop::begin(&surface, sender)
+            })
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.ivars().surface.borrow().upgrade().map_or(NSDragOperation::None, |surface| {
+                crate::file_drop::update(&surface, sender)
+            })
+        }
+
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+            if let Some(surface) = self.ivars().surface.borrow().upgrade() {
+                crate::file_drop::clear(&surface);
+            }
+        }
+
+        #[unsafe(method(prepareForDragOperation:))]
+        fn prepare_drag(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            self.ivars().surface.borrow().upgrade().is_some_and(|surface| {
+                crate::file_drop::update(&surface, sender) == NSDragOperation::Copy
+            })
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            self.ivars().surface.borrow().upgrade().is_some_and(|surface| {
+                crate::file_drop::perform(&surface, sender)
+            })
+        }
+
+        #[unsafe(method(draggingEnded:))]
+        fn dragging_ended(&self, _sender: &ProtocolObject<dyn NSDraggingInfo>) {
+            if let Some(surface) = self.ivars().surface.borrow().upgrade() {
+                crate::file_drop::clear(&surface);
+            }
+        }
+    }
+
     impl ViewObj {
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
@@ -476,8 +523,31 @@ define_class!(
         fn accepts_first_responder(&self) -> bool {
             // A click outside a field that edits leaves the focus in it, as
             // desktop apps do (`blur()` and Escape still hand it over).
-            self.surface()
-                .is_some_and(|s| !(crate::text_input::editing(&s) && clicking(self.mtm())))
+            let view = NshView(self.retain());
+            (view.id() == ROOT_ID || crate::input::is_key_control(&view))
+                && self.keyboard_surface().is_some_and(|s| {
+                    !(crate::text_input::editing(&s) && clicking(self.mtm()))
+                })
+        }
+
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            // SAFETY: NSView's standard responder transition.
+            let accepted: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+            if accepted && let Some(surface) = self.keyboard_surface() {
+                crate::input::set_state(&surface, &NshView(self.retain()), nsh_core::tailwind::state::FOCUSED, true);
+            }
+            accepted
+        }
+
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            // SAFETY: NSView's standard responder transition.
+            let accepted: bool = unsafe { msg_send![super(self), resignFirstResponder] };
+            if accepted && let Some(surface) = self.keyboard_surface() {
+                crate::input::set_state(&surface, &NshView(self.retain()), nsh_core::tailwind::state::FOCUSED, false);
+            }
+            accepted
         }
 
         #[unsafe(method(mouseDown:))]
@@ -581,7 +651,7 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            let handled = self.surface().is_some_and(|surface| {
+            let handled = self.keyboard_surface().is_some_and(|surface| {
                 surface.measure(false, || {
                     let handled = crate::input::key(&surface, event, true);
                     // Keys scroll too.
@@ -598,7 +668,7 @@ define_class!(
         #[unsafe(method(keyUp:))]
         fn key_up(&self, event: &NSEvent) {
             let handled = self
-                .surface()
+                .keyboard_surface()
                 .is_some_and(|surface| crate::input::key(&surface, event, false));
             if !handled {
                 // SAFETY: NSResponder's own handling.
@@ -651,6 +721,24 @@ define_class!(
 );
 
 impl ViewObj {
+    // Only the root stores a surface. A focused pressable child uses its
+    // ancestors for keyboard handling; drawing and pointer hooks stay root-only.
+    fn keyboard_surface(&self) -> Option<std::rc::Rc<Surface>> {
+        if let Some(surface) = self.surface() {
+            return Some(surface);
+        }
+        let mut parent = superview(self);
+        while let Some(view) = parent {
+            if let Some(root) = view.downcast_ref::<ViewObj>()
+                && let Some(surface) = root.surface()
+            {
+                return Some(surface);
+            }
+            parent = superview(&view);
+        }
+        None
+    }
+
     fn surface(&self) -> Option<std::rc::Rc<Surface>> {
         self.ivars().surface.borrow().upgrade()
     }

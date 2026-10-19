@@ -53,7 +53,7 @@ VM 会继续运行：下一个事件、定时器或帧照常执行。
 > 更新冻结那么久。可以用 `setTimeout` 把它拆开，或者把它移出事件处理函数。
 
 宿主应用可以按视图修改限制：[iOS](./embedding-ios.md) 上用 `NshAppView.limits`，
-[Android](./embedding-android.md) 上用 `NshView.setLimits`。修改从下一次加载开始生效。
+[Android](./embedding-android.md) 上用 `NshView.setLimits`，[GPUI 应用](./gpui.md) 里用 `AppOptions::limits` / `AppView::set_limits`。修改从下一次加载开始生效。
 
 ## 加固
 
@@ -140,6 +140,10 @@ web view 内的顶层导航也会在加载前由平台的导航代理检查。�
 ### `clipboard`
 
 `"clipboard": true` 允许应用读写系统剪贴板（[`nsh/clipboard`](../modules/nsh-clipboard.md)）。从可选文本的编辑菜单复制是用户自己的操作，不需要这项能力。
+
+### 存储
+
+每个应用都可以用 [`nsh/storage`](../modules/nsh-storage.md) 在设备上保存自己的数据，无需任何能力：存储里只有该应用自己的数据，保存位置由宿主应用决定。
 
 ### 被拒绝时的表现
 

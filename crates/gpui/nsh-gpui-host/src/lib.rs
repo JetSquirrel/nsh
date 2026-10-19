@@ -10,6 +10,10 @@
 //!   X11, which shots need).
 //! - `--size 1200x800` sets the window size.
 //! - `--fps` logs frame statistics once a second (`nsh::perf fps …`).
+//! - `--app-id <id>` sets the application id (`com.example.app`); `nsh run`
+//!   passes the app's (`nsh.json` `"id"`). The app's data (`nsh/storage`)
+//!   is kept under the id its bundle carries, in the system's data
+//!   directory.
 //!
 //! Without arguments it connects to the dev server on this machine.
 //!
@@ -22,11 +26,15 @@
 pub fn main() -> std::process::ExitCode {
     use std::{env, path::PathBuf};
 
-    use nsh_platform_gpui::{AppOptions, AppSource, AssetBase, Bundle, dev, run_app};
+    use nsh_platform_gpui::{AppOptions, AppSource, AssetBase, Bundle, Limits, dev, run_app};
 
     dev::init_logging();
     let mut source = None;
-    let mut options = AppOptions::default();
+    // As the release runner runs the app: on its own.
+    let mut options = AppOptions {
+        limits: Limits::standalone_desktop(),
+        ..AppOptions::default()
+    };
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -49,6 +57,11 @@ pub fn main() -> std::process::ExitCode {
                 source = Some(AppSource::Bundle(bundle));
             }
             "--trace" => options.trace = true,
+            "--app-id" => {
+                if let Some(id) = args.next().filter(|id| !id.is_empty()) {
+                    options.app_id = id;
+                }
+            }
             "--fps" => options.fps = true,
             "--script" => options.script = args.next(),
             "--size" => {

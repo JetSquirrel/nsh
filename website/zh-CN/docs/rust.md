@@ -75,6 +75,9 @@ pub fn App() -> impl IntoElement {
 }
 ```
 
+监听器是接收事件的闭包（`move |text: &str| ..`），没有数据的事件也可以写成 `move || ..`；`.child(..)`
+接受一个元素，或元素的 `Option`、`Vec`、数组、迭代器（`.child(rows.iter().map(|r| row(r)))`）。
+
 `nsh.json` 指定根组件，`nsh` 负责挂载它：
 
 ```json
@@ -104,6 +107,39 @@ iOS 的 `AppView` 上用 `AppSource::Rust` 挂载 Rust 根组件。
 要在包括 Web 在内的所有平台上运行的代码，使用 NSH 提供的服务：HTTP 用 `fetch`（[网络](./networking.md#在-rust-组件中)），
 等待用 `timer`、`set_timeout` 和 `set_interval`，时钟用 `nsh_core::time::Instant` 和 `nsh_core::time::unix_ms()`。
 `background` 和 `blocking` 在原生目标的线程上运行任务。
+
+## 桌面标题栏
+
+Rust 应用通过 `nsh_core::ui::desktop` 绘制自定义标题栏。调用
+`set_title_bar(TitleBarStyle::Hidden, Some(height))`，将背景设为
+`.window_drag(true)`，并通过 `title_bar()` 为系统窗口按钮留出空间。
+返回值的 `top` 是标题栏高度，`left` 和 `right` 是两侧系统按钮占用的宽度。
+读取会订阅变化，包括进入和退出全屏。平台负责窗口拖动和用户设置的标题栏双击行为；
+子元素上的 `.window_drag(false)` 可以排除父元素的拖动区域。
+
+```rust
+use nsh_core::{
+    desktop::TitleBarStyle,
+    ui::{desktop::{close_window, set_title_bar, title_bar}, prelude::*},
+};
+
+#[component]
+fn TitleBar() -> impl IntoElement {
+    set_title_bar(TitleBarStyle::Hidden, Some(42.0));
+    view()
+        .h(px(42.0))
+        .flex_row()
+        .items_center()
+        .window_drag(true)
+        .pl(move || px(title_bar().left + 12.0))
+        .pr(move || px(title_bar().right + 12.0))
+        .child(text("My app").flex_1())
+        .child(text("Close").window_drag(false).on_press(close_window))
+}
+```
+
+`set_title_bar(TitleBarStyle::Default, None)` 恢复系统标题栏。
+`close_window()` 遵循宿主的正常窗口关闭行为。
 
 ## 用 TSX 扩展 Rust 应用
 

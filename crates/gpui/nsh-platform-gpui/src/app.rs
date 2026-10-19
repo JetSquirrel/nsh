@@ -4,6 +4,7 @@
 
 use std::{
     cell::RefCell,
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, RwLock},
 };
@@ -112,6 +113,19 @@ pub struct AppOptions {
     /// Log frame statistics once a second (`nsh::perf fps …`): see
     /// [`AppView::set_fps_monitor`].
     pub fps: bool,
+    /// The VM limits of the apps it runs: [`Limits::default`] (an app
+    /// embedded in a host app) unless set; the development host and the
+    /// release runner run apps on their own, with
+    /// [`Limits::standalone_desktop`]. See [`AppView::set_limits`].
+    pub limits: Limits,
+    /// Where the apps it runs keep their data, each in `<dir>/<app id>`
+    /// (`nsh.json` `"id"`, which travels with the bundle): `None` uses the
+    /// system's data directory ([`nsh_engine::data_dir`]); an app that
+    /// embeds nsh gives its own (its data directory + `/nsh`, say).
+    pub data_dir: Option<PathBuf>,
+    /// The apps' storage (`nsh/storage`), overriding the `storage.json` in
+    /// their directory of [`data_dir`](Self::data_dir).
+    pub storage: Option<Arc<dyn nsh_engine::StorageBackend>>,
 }
 
 impl Default for AppOptions {
@@ -126,6 +140,9 @@ impl Default for AppOptions {
             components: Default::default(),
             appearance: Appearance::System,
             fps: false,
+            limits: Limits::default(),
+            data_dir: None,
+            storage: None,
         }
     }
 }
@@ -253,9 +270,11 @@ impl AppView {
             assets: Some(Arc::new(AssetReader(options.asset_base.clone()))),
             environment: self.surface.environment.get(),
             header_heights: crate::navigation::HEADER_HEIGHTS,
-            limits: Limits::default(),
+            limits: options.limits,
             ui_sets: ui_sets(),
             runtime: None,
+            data_dir: options.data_dir.clone().or_else(nsh_engine::data_dir),
+            storage: options.storage.clone(),
         };
         crate::image::set_asset_base(&self.surface, options.asset_base.clone());
         self.surface
@@ -273,6 +292,27 @@ impl AppView {
         crate::image::set_asset_base(&self.surface, base.clone());
         self.surface.native.set_asset_base(base.clone());
         self.options.borrow_mut().asset_base = base;
+    }
+
+    /// The VM limits ([`AppOptions::limits`]) of the apps loaded from now
+    /// on: the JS heap, the stack, the time budgets of loading and of every
+    /// other call into JS, and the quotas (nodes, ops). The running app
+    /// keeps the limits it was loaded with.
+    pub fn set_limits(&self, limits: Limits) {
+        self.options.borrow_mut().limits = limits;
+    }
+
+    /// Development: loads the app from a `nsh dev` server (`ws://host:port/ws`)
+    /// and loads it again on every rebuild (in place when it can: hot
+    /// updates), with the dev server's assets, its logs forwarded to the
+    /// developer's terminal, and build and runtime errors shown over the
+    /// app (Ctrl+R, Cmd+R on macOS, or F5 loads the latest build again).
+    /// [`AppView::on_error`] still hears the app's errors. Connecting again
+    /// replaces the session; dropping the view ends it. Call it through
+    /// `view.update(cx, |view, cx| …)`.
+    #[cfg(feature = "dev")]
+    pub fn connect_dev_server(&self, url: impl Into<String>, cx: &mut Context<Self>) {
+        crate::dev::start(self, url.into(), cx);
     }
 
     /// Registers native component `name` (`nativeComponent(name, ...)` in
@@ -335,7 +375,8 @@ impl AppView {
 
     /// Calls `f` with the message of every fatal error of the app (an
     /// uncaught exception at the start, a VM limit reached), which is also
-    /// logged.
+    /// logged; replaces the previous handler. A dev session
+    /// ([`AppView::connect_dev_server`]) shows them too.
     pub fn on_error(&self, f: impl Fn(&str) + 'static) {
         self.surface.set_error_handler(Box::new(f));
     }
@@ -635,7 +676,9 @@ pub fn open_app_window(
             AppSource::Rust(root) => view.read(cx).load(App::Rust(root)),
             AppSource::Bundle(bundle) => view.read(cx).load(App::Js(bundle)),
             #[cfg(feature = "dev")]
-            AppSource::DevServer(url) => crate::dev::start(&view, url, cx),
+            AppSource::DevServer(url) => {
+                view.update(cx, |view, cx| view.connect_dev_server(url, cx))
+            }
         }
         let focus = view.read(cx).focus.clone();
         crate::system::own_window(view.read(cx).surface());

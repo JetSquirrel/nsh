@@ -30,7 +30,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/release.yml"
-      - ".github/packages/**"
+      - ".github/packages/nsh.json"
       - "crates/xtask/**"
   workflow_dispatch:
     inputs:

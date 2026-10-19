@@ -202,10 +202,11 @@ The display name becomes a normalized Cargo package name prefixed with `nsh-app-
 uses its Rust crate identifier. Rust creation checks for existing app and Cargo source files before
 writing any of them. The ordinary TSX initializer continues preserving existing files.
 
-Independent apps use crates.io dependencies. Generated host workspaces patch those NSH dependencies
-to the selected source checkout, so the app and its hosts share the same core and registry types.
+`nsh init --rust` writes crates.io dependencies at the CLI's version, or with `--nsh-source <dir>` path
+dependencies on that checkout's crates; the generated host workspaces take nsh's crates from the same place, so the
+app and its hosts share the same core and registry types.
 The app's Rust watcher excludes `target`, `.nsh` and `.git`, including generated sources under the
-app root. Custom TypeScript declarations are generated when the app's command line is first built.
+app root, and the build directory itself (`CARGO_TARGET_DIR` inside a crate's directory under another name). Custom TypeScript declarations are generated when the app's command line is first built.
 
 ## Apps with Rust components of their own (`nsh.json` `"rust"`)
 
@@ -255,10 +256,20 @@ toolchain cannot know the sets, so `nsh` builds the app its own (`crates/nsh-cli
   components"). `gpui-host` / `gpui-app` (`nsh_platform_gpui::set_ui_sets`, under `cfg(any(target_os = "linux",
   target_os = "macos", windows))`; `gpui-app` is a windowed program on Windows too) are a workspace of their own in
   `.nsh/rust/gpui` (excluded from the main one), written only when a GPUI host or runner is built
-  (`RustApp::gpui_workspace`), so builds for the other targets never resolve GPUI's crates. They build against NSH's
-  sources (the checkout the running `nsh` was built in, or `NSH_SOURCE`) with NSH's `Cargo.lock` and target directory,
-  so only the app's code and what links it compile; the binaries are named after the app (`nsh-app-<package>-cli`; with
-  several crates all their packages, `nsh-app-charts-storage-cli`). `.nsh/rust/app.json` keeps the crates (package and
+  (`RustApp::gpui_workspace`), so builds for the other targets never resolve GPUI's crates. They take nsh's crates
+  where the app's crates do (`rust_app::Nsh::of`, from each crate's dependencies through `cargo metadata --no-deps`):
+  from crates.io at the version of the running `nsh` (`=0.1.1` for nsh 0.1.1: the code it generates calls their API),
+  which the app's requirements must accept, or by path from the checkout the app's crates depend on (nsh's own
+  examples, as `examples/gallery-rs`, through the workspace's path dependencies), which must be of that version, with
+  the app's crates.io dependencies on nsh patched to it. Requirements of another version, or crates taking nsh from
+  two places, stop the command with what to change, rather than a build failing later on two `nsh-core`s. They build
+  in the app's own `target/`, as a Cargo project in the app's directory does (`nsh init` ignores it), or in
+  `CARGO_TARGET_DIR` when it is set (one directory several checkouts or CI jobs share), and Cargo
+  resolves and keeps the workspace's own `Cargo.lock`. Every crate those workspaces depend on is published by
+  `release-crate.yml`, the hosts and runners included; the binaries are named after the app (`nsh-app-<package>-cli`; with
+  several crates all their packages, `nsh-app-charts-storage-cli`), and so are the libraries (the web runtime's, the
+  Android `cdylib`s: `libnsh_app_charts_android.so`, installed as `libnsh.so`), so apps sharing a target directory never
+  take each other's. `.nsh/rust/app.json` keeps the crates (package and
   directory), the watched directories and the root for the app's command line (`rust_app::current`).
 - A command on the app (`build`, `trace`, `dev`, `run`, `package`, `publish`) builds `cli` and runs again in it
   (`NSH_RUST_APP` names the workspace). Everything then knows the app's sets: the bundler keeps their imports, bytecode
@@ -329,12 +340,34 @@ How users get it (`website/docs/installation.md`):
   `~/.nsh` (`%LOCALAPPDATA%\nsh` on Windows) with it; `~/.local/bin/nsh` links to it, Windows adds `bin` to the
   user's `PATH`. The CLI resolves its own symlink (`runtime::cli_exe`) to find `bin/../runtime`: macOS reports
   `current_exe` as it was run.
-- Homebrew: publishing the release runs `.github/workflows/packages.yml`, which fills in
+- Homebrew: publishing a stable release runs `.github/workflows/packages.yml`, which fills in
   `.github/packages/nsh.rb` with the archives' checksums and pushes it to `longbridge/homebrew-tap` as
-  `Formula/nsh.rb` (secret `HOMEBREW_TAP_TOKEN`). The formula keeps the distribution in `libexec`.
+  `Formula/nsh.rb`. It validates the tag and checksum sidecars, downloads and verifies both archives, then installs
+  and tests the formula on Apple silicon before updating the tap. The formula supports Apple-silicon macOS and
+  x86_64 Linux, keeps the whole distribution in `libexec`, and tests web packaging through the installed symlink.
+  Pull requests and pushes to `main` that change the package files run these checks without writing to the tap.
 - Scoop: the release job fills in `.github/packages/nsh.json` and attaches it as `nsh.json`; Scoop installs from
   `releases/latest/download/nsh.json` and updates from the same URL, so nothing is committed anywhere.
 - mise: its `github:` backend picks the archive by OS and architecture, strips `nsh/` and finds `bin/`.
+
+### Homebrew publishing setup and recovery
+
+A maintainer must configure the existing `HOMEBREW_TAP_TOKEN` Actions secret in `longbridge/nsh` (or an organization
+secret made available to this repository). It needs **Contents: read and write** on `longbridge/homebrew-tap` only,
+and permission to push the tap's default branch under its branch rules. The NSH workflow's own `GITHUB_TOKEN` stays
+read-only: it cannot write another repository. Do not grant broader repository access or bypass branch protection.
+The job reports a specific error when the tap secret is missing; invalid or expired credentials still fail at checkout
+or push. Setting credentials is a maintainer step, separate from merging the workflow change.
+
+After configuring the secret, run **Packages** from the Actions page on `main`, with the published stable tag to sync
+(or leave it empty for the latest release). This only updates the tap; it does not build or publish a release. Drafts
+and prereleases are refused. Repeating a successful run makes no commit when the formula is unchanged, and an older
+version cannot replace a newer formula. Writers queue serially; if another tap contributor advances the branch during
+the update, a rejected push can be retried with a fresh run. Use a new dispatch on `main` to apply workflow fixes to an
+old release: rerunning an old failed run keeps that run's original workflow revision.
+
+For local generator regression checks, run `python3 -m unittest discover -s .github/packages -v`. The `Packages` PR
+check additionally runs Homebrew style, strict audit, installation and the formula's CLI/web-runtime smoke test.
 
 ## Entries and `cargo run`
 

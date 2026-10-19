@@ -108,6 +108,13 @@ fn show(window: &NSWindow) -> Rc<AppView> {
 
 原生组件通过 `AppView::register_component` 注册，见[原生组件](./native-components.md#在-macos-上注册rust)。
 
+默认情况下，关闭窗口或选择退出会停止引擎，并从 `run_app` 返回；调用方可以继续完成清理或重新启动可执行文件。
+
+设置 `AppOptions { keep_alive_on_close: true, ..Default::default() }` 可以在关闭窗口后保留独立应用的会话。
+关闭操作会隐藏窗口，从 Dock 重开时会显示同一个窗口和引擎。明确退出或更新重启时，可以从任意线程调用
+`nsh_platform_macos::quit_app()`；它会关闭保留的窗口、停止引擎，并从 `run_app` 返回。
+`nsh_core::ui::desktop::close_window()` 遵循所选的窗口关闭策略。
+
 ## macOS 上的差异
 
 运行环境是桌面环境：安全区和键盘高度为 0，`Platform.constants.interfaceIdiom` 为 `"desktop"`，`Platform.Version` 为 macOS 的版本号，
@@ -126,7 +133,7 @@ Return 的默认按钮）；更多按钮以及操作表的选项按顺序竖排�
 |---|---|
 | Return | 在 `Input` 中按 `submitBehavior` 的设定：提交（`onSubmitEditing`）、提交并离开输入框，或换行（多行输入框） |
 | Shift+Return、Option+Return、Ctrl+Return | 在 Return 用于提交的多行输入框中换行 |
-| Tab、Shift+Tab（加 Ctrl 亦可） | 按屏幕顺序切换到下一个 / 上一个输入框，限于最新的模态视图内；Option+Tab 在多行输入框中输入制表符 |
+| Tab、Shift+Tab（加 Ctrl 亦可） | 按屏幕顺序切换到下一个 / 上一个输入框或可按压视图，限于最新的模态视图内；Option+Tab 在多行输入框中输入制表符 |
 | Escape | 离开有焦点的输入框；否则清除文本选区，再返回或请求最新的模态视图关闭 |
 | Option+Left、Cmd+[、鼠标后退键 | 返回（输入框有焦点时不会：此时 Option+Left 移动光标） |
 | Option / Cmd + 方向键（可加 Shift）；Option+Delete、Cmd+Delete；Ctrl+A / E / K | 在输入框中按词和按行移动、选择和删除，与所有 Mac 应用一致 |
@@ -135,7 +142,7 @@ Return 的默认按钮）；更多按钮以及操作表的选项按顺序竖排�
 | Cmd+W、Cmd+M、Ctrl+Cmd+F、Cmd+H、Option+Cmd+H、Cmd+Q | 关闭、最小化、全屏、隐藏、隐藏其他、退出（`nsh package` 和 `nsh run` 应用的菜单） |
 | Cmd+R | 重新加载最新的构建（`nsh run`） |
 
-应用自己的快捷键（[`nsh/keymap`](../modules/nsh-keymap.md)）先于以上所有按键处理，但退出、隐藏、最小化和全屏不能被绑定。
+应用自己的快捷键（[`nsh/keymap`](../modules/nsh-keymap.md)）先于以上按键处理，但聚焦的可按压视图优先接收其激活键；退出、隐藏、最小化和全屏不能被绑定。
 
 快捷键在任何键盘布局下都可用（在西里尔或希腊字母布局下，Cmd+C 是美式布局中输入 C 的那个键）。确认输入法组字（中文、日文等）的
 Return 不会提交。`onKeyPress` 报告的内容与 React Native 一致：输入的文本、`"Enter"`、`"Backspace"` 以及 `"Escape"`。
@@ -149,6 +156,10 @@ Return 不会提交。`onKeyPress` 报告的内容与 React Native 一致：输�
   页面仍可用键盘（空格、方向键）和它自己的脚本滚动，触控板在页面之间的轻扫（`allowsBackForwardNavigationGestures`）也会停用。
 - **无障碍**：自定义 `accessibilityActions`。
 - **状态栏**和**触感反馈**（桌面上没有对应物）。
+
+带有 `onPress` 的已启用普通视图与输入框一起参与 Tab/Shift+Tab 焦点导航，范围限制在最上层模态窗口中。
+聚焦的可按压视图会在 Return、数字键盘 Enter 或 Space 按下时触发一次按压事件；长按重复和按键抬起不会再次触发。
+这些激活键优先交给聚焦的控件，带修饰键的快捷键沿用原有优先级。`focus:` 样式和无障碍焦点会同步键盘焦点。
 
 ## 另见
 

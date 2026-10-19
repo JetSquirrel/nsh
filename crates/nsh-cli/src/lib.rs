@@ -67,6 +67,11 @@ enum Command {
         /// sharing the same Rust components. Requires a Rust toolchain.
         #[arg(long)]
         rust: bool,
+        /// With `--rust`: depend on the nsh crates of this checkout by path,
+        /// instead of crates.io's at this CLI's version (the app's hosts
+        /// build from the same place).
+        #[arg(long, value_name = "DIR", requires = "rust")]
+        nsh_source: Option<PathBuf>,
     },
     /// Bundle an app and compile it to QuickJS bytecode.
     Build {
@@ -242,6 +247,24 @@ enum Command {
         /// Build number: must grow with every release.
         #[arg(long)]
         build: Option<u32>,
+        /// Where the source map goes: into the package (devices report
+        /// errors at app source positions), into a file next to it
+        /// (`<package>.map`, for `nsh symbolicate`), or nowhere.
+        #[arg(long, value_enum, default_value_t = sign::SourceMapOut::Package)]
+        source_map: sign::SourceMapOut,
+        /// Leave the line and column tables out of the bytecode: a smaller
+        /// package whose error stacks have no positions.
+        #[arg(long)]
+        strip_debug: bool,
+    },
+    /// Map the positions in a reported error stack (`bundle.js:LINE:COL`)
+    /// to the app's sources, with a package's source map.
+    Symbolicate {
+        /// The source map (`<package>.map`, `bundle.js.map`) or a package
+        /// (`.nshpkg`) that holds one.
+        map: PathBuf,
+        /// The error text (default: standard input).
+        input: Option<PathBuf>,
     },
     /// Verify a package as an app trusting the given roots would (without
     /// roots: only its signature).
@@ -345,6 +368,7 @@ impl Command {
             | Command::Keygen { .. }
             | Command::Certify { .. }
             | Command::Verify { .. }
+            | Command::Symbolicate { .. }
             | Command::Revoke { .. } => None,
         }
     }
@@ -421,7 +445,12 @@ fn run(mut command: Command) -> anyhow::Result<()> {
 
 fn dispatch(command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Init { dir, name, rust } => init::init(&dir, name, rust),
+        Command::Init {
+            dir,
+            name,
+            rust,
+            nsh_source,
+        } => init::init(&dir, name, rust, nsh_source.as_deref()),
         Command::Build {
             entry,
             out,
@@ -535,6 +564,8 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             id,
             version,
             build,
+            source_map,
+            strip_debug,
         } => {
             let mut config = package::read_config(&entry)?;
             config.id = id.or(config.id);
@@ -546,8 +577,11 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
                 cert: &cert,
                 out,
                 config,
+                source_map,
+                strip_debug,
             })
         }
+        Command::Symbolicate { map, input } => sign::symbolicate(&map, input.as_deref()),
         Command::Verify {
             package,
             root,

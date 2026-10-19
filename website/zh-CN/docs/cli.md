@@ -1,6 +1,6 @@
 ---
 title: 命令行
-description: NSH 的全部子命令与参数：init、build、trace、dev、run、package，以及签名相关的 keygen、certify、publish、verify 和 revoke。
+description: NSH 的全部子命令与参数：init、build、trace、dev、run、package，以及签名相关的 keygen、certify、publish、verify、symbolicate 和 revoke。
 order: 6
 group: start
 ---
@@ -12,17 +12,18 @@ group: start
 ```text
 nsh <COMMAND>
 
-  init     Create an app
-  build    Bundle an app and compile it to QuickJS bytecode
-  trace    Run an app headless and print the mount instructions and timings
-  dev      Serve an app to dev hosts (simulators, devices) and push rebuilds
-  run      Like dev, and also run the app in a development host
-  package  Package an installable app from the prebuilt runtime
-  keygen   Create a signing key
-  certify  Certify a release key with a root key
-  publish  Build an app in release mode and sign it into a package (.nshpkg)
-  verify   Verify a package
-  revoke   Sign a revocation list
+  init         Create an app
+  build        Bundle an app and compile it to QuickJS bytecode
+  trace        Run an app headless and print the mount instructions and timings
+  dev          Serve an app to dev hosts (simulators, devices) and push rebuilds
+  run          Like dev, and also run the app in a development host
+  package      Package an installable app from the prebuilt runtime
+  keygen       Create a signing key
+  certify      Certify a release key with a root key
+  publish      Build an app in release mode and sign it into a package (.nshpkg)
+  verify       Verify a package
+  symbolicate  Map the positions in a reported error stack to the app's sources
+  revoke       Sign a revocation list
 ```
 
 `nsh <command> --help` 打印某个命令的参数；`nsh --version` 打印版本号。
@@ -51,7 +52,7 @@ warn iOS Simulator: image failed: An SSL error has occurred and a secure connect
 ## nsh init
 
 ```sh
-nsh init [DIR] [--name <NAME>] [--rust]
+nsh init [DIR] [--name <NAME>] [--rust [--nsh-source <DIR>]]
 ```
 
 默认在 `DIR`（默认为当前目录，不存在时会创建）中创建 TSX 应用：`App.tsx`、`nsh.json`、`tsconfig.json`、`.gitignore` 和 `.nsh/types`。已存在的文件会保留；只有当这些文件全部已存在时才会失败。
@@ -60,8 +61,9 @@ nsh init [DIR] [--name <NAME>] [--rust]
 |---|---|
 | `--name <NAME>` | 写入 `nsh.json` 的显示名称。默认为目录名。id 会是 `com.example.<name>`（只保留字母和数字，转为小写）。 |
 | `--rust` | 创建 Cargo 项目，提供原生 Rust 入口（`cargo run`）和共享 Rust 组件的 TSX 入口。需要 Rust 工具链及原生桌面后端的开发库。 |
+| `--nsh-source <DIR>` | 与 `--rust` 一起使用：项目按路径依赖 `DIR` 中 NSH 源码仓库的 crate，基于 NSH 源码构建应用。 |
 
-使用 `--rust` 时还会生成 `Cargo.toml`、`src/main.rs` 、`src/lib.rs` 和 README，并在 `nsh.json` 中设置 `"rust": "."` 和 `"root": "App"`。在 macOS、Windows 或 Linux 上通过 `cargo run` 运行 Rust 入口；`nsh run` 和 `nsh package` 会在所有目标（包括浏览器）上直接挂载 Rust 根组件，不使用 QuickJS（见[用 Rust 开发](./rust.md)）；`nsh run App.tsx` 运行 TSX 入口。`nsh` 命令使用 NSH 源码仓库（CLI 所在的仓库或 `NSH_SOURCE`）构建应用的运行器。请在新的应用目录中创建 Rust 项目；已有的 Cargo 清单、Rust 入口文件、`App.tsx` 或 `nsh.json` 会在写入应用文件之前报告为冲突。
+使用 `--rust` 时还会生成 `Cargo.toml`、`src/main.rs` 、`src/lib.rs` 和 README，并在 `nsh.json` 中设置 `"rust": "."` 和 `"root": "App"`。在 macOS、Windows 或 Linux 上通过 `cargo run` 运行 Rust 入口；`nsh run` 和 `nsh package` 会在所有目标（包括浏览器）上直接挂载 Rust 根组件，不使用 QuickJS（见[用 Rust 开发](./rust.md)）；`nsh run App.tsx` 运行 TSX 入口。项目依赖 crates.io 上与 CLI 同版本的 NSH crate（使用 `--nsh-source` 时依赖该源码仓库中的 crate），`nsh` 命令用同样的 crate 构建应用的运行器。请在新的应用目录中创建 Rust 项目；已有的 Cargo 清单、Rust 入口文件、`App.tsx` 或 `nsh.json` 会在写入应用文件之前报告为冲突。
 
 ## nsh run
 
@@ -224,6 +226,7 @@ nsh certify --root <ROOT.secret> --key <KEY.pub> --apps <PATTERN>... [--days <DA
 
 ```sh
 nsh publish [ENTRY] --key <KEY.secret> --cert <CERT> [-o <OUT>] [--id <ID>] [--app-version <V>] [--build <N>]
+            [--source-map package|file|none] [--strip-debug]
 ```
 
 以 release 模式构建应用并签名为一个包。元数据来自 `nsh.json`，可被参数覆盖。
@@ -236,6 +239,8 @@ nsh publish [ENTRY] --key <KEY.secret> --cert <CERT> [-o <OUT>] [--id <ID>] [--a
 | `--id <ID>` | 应用 id。 |
 | `--app-version <VERSION>` | 版本号。 |
 | `--build <BUILD>` | 构建号：每次发布都必须递增。 |
+| `--source-map <WHERE>` | source map 放在哪里：`package`（默认）、`file`（包旁边的 `<package>.map`）或 `none`（[签名包](./signed-packages.md#已发布包的报错)）。 |
+| `--strip-debug` | 字节码中不保留行号和列号表：更小，但报错调用栈里没有位置。 |
 
 ### nsh verify
 
@@ -244,6 +249,16 @@ nsh verify <PACKAGE> [--root <ROOT.pub>]... [--revocations <LIST>]
 ```
 
 按信任给定根密钥的应用的方式校验一个包。不带 `--root` 时只检查包自身的签名。它会打印包的 SHA-256，`nsh revoke --package` 接受的就是这个值。
+
+### nsh symbolicate
+
+```sh
+nsh symbolicate <MAP> [INPUT]
+```
+
+把包上报的报错中的 bundle 位置（`bundle.js:LINE:COL`）改写为你的源码位置并打印结果。`MAP` 是 source map
+（`nsh publish --source-map file` 输出的 `<package>.map`，或 `bundle.js.map`），或带有 source map 的包；`INPUT`
+是报错文本（默认：标准输入）。
 
 ### nsh revoke
 
@@ -267,6 +282,7 @@ nsh revoke --root <ROOT.secret> [--extend <LIST>] [--sequence <N>] [--key <ID>].
 | 变量 | 使用者 | 说明 |
 |---|---|---|
 | `ANDROID_HOME`、`ANDROID_SDK_ROOT` | Android 目标 | Android SDK 位置。后备路径：`~/Library/Android/sdk`。 |
+| `CARGO_TARGET_DIR` | 带 Rust crate 的应用 | 应用运行器的构建目录。默认为应用的 `target/`。 |
 | `NSH_KEYSTORE_PASSWORD` | `package --target android` | keystore 密码。 |
 | `NSH_RUNTIME` | `run`、`package` | 用来替代 CLI 旁边运行时的运行时目录。 |
 | `NSH_VERBOSE` | 所有命令 | `1`：等同于 `--verbose`。 |

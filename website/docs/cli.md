@@ -1,6 +1,6 @@
 ---
 title: CLI
-description: Every NSH subcommand and flag - init, build, trace, check, dev, run, package, and the signing commands keygen, certify, publish, verify and revoke.
+description: Every NSH subcommand and flag - init, build, trace, check, dev, run, package, and the signing commands keygen, certify, publish, verify, symbolicate and revoke.
 order: 6
 group: start
 ---
@@ -12,18 +12,19 @@ group: start
 ```text
 nsh <COMMAND>
 
-  init     Create an app
-  build    Bundle an app and compile it to QuickJS bytecode
-  trace    Run an app headless and print the mount instructions and timings
-  check    Type check an app with TypeScript's native compiler
-  dev      Serve an app to dev hosts (simulators, devices) and push rebuilds
-  run      Like dev, and also run the app in a development host
-  package  Package an installable app from the prebuilt runtime
-  keygen   Create a signing key
-  certify  Certify a release key with a root key
-  publish  Build an app in release mode and sign it into a package (.nshpkg)
-  verify   Verify a package
-  revoke   Sign a revocation list
+  init         Create an app
+  build        Bundle an app and compile it to QuickJS bytecode
+  trace        Run an app headless and print the mount instructions and timings
+  check        Type check an app with TypeScript's native compiler
+  dev          Serve an app to dev hosts (simulators, devices) and push rebuilds
+  run          Like dev, and also run the app in a development host
+  package      Package an installable app from the prebuilt runtime
+  keygen       Create a signing key
+  certify      Certify a release key with a root key
+  publish      Build an app in release mode and sign it into a package (.nshpkg)
+  verify       Verify a package
+  symbolicate  Map the positions in a reported error stack to the app's sources
+  revoke       Sign a revocation list
 ```
 
 `nsh <command> --help` prints the flags of a command; `nsh --version` prints the version.
@@ -53,7 +54,7 @@ source, cargo's output and the hosts' own.
 ## nsh init
 
 ```sh
-nsh init [DIR] [--name <NAME>] [--rust]
+nsh init [DIR] [--name <NAME>] [--rust [--nsh-source <DIR>]]
 ```
 
 By default, creates a TSX app in `DIR` (default: the current directory, created if missing): `App.tsx`, `nsh.json`, `tsconfig.json`, `.gitignore` and `.nsh/types`. Files that exist are kept; it fails only if all of them exist already.
@@ -62,8 +63,9 @@ By default, creates a TSX app in `DIR` (default: the current directory, created 
 |---|---|
 | `--name <NAME>` | Display name written to `nsh.json`. Default: the directory's name. The id becomes `com.example.<name>` (letters and digits only, lower case). |
 | `--rust` | Creates a Cargo project with a native Rust entry (`cargo run`) and a TSX entry sharing its Rust components. Requires Rust and the native desktop backend's development libraries. |
+| `--nsh-source <DIR>` | With `--rust`: the project depends on the NSH crates of the checkout in `DIR`, by path, to build the app against NSH's sources. |
 
-With `--rust`, the project also contains `Cargo.toml`, `src/main.rs`, `src/lib.rs` and a README; `nsh.json` sets `"rust": "."` and `"root": "App"`. `nsh run` and `nsh package` then mount the Rust root with no QuickJS on every target, the browser included ([Building with Rust](./rust.md)); `cargo run` starts it on macOS, Windows or Linux directly; `nsh run App.tsx` runs the TSX entry. The `nsh` commands build the app's runners from an NSH source checkout (the CLI's checkout or `NSH_SOURCE`). Create Rust projects in a new app directory. Existing Cargo manifests, Rust entry files, `App.tsx` or `nsh.json` are reported as conflicts before app files are written.
+With `--rust`, the project also contains `Cargo.toml`, `src/main.rs`, `src/lib.rs` and a README; `nsh.json` sets `"rust": "."` and `"root": "App"`. `nsh run` and `nsh package` then mount the Rust root with no QuickJS on every target, the browser included ([Building with Rust](./rust.md)); `cargo run` starts it on macOS, Windows or Linux directly; `nsh run App.tsx` runs the TSX entry. The project depends on NSH's crates on crates.io at the CLI's version (with `--nsh-source`, on a checkout's), and the `nsh` commands build the app's runners from the same crates. Create Rust projects in a new app directory. Existing Cargo manifests, Rust entry files, `App.tsx` or `nsh.json` are reported as conflicts before app files are written.
 
 ## nsh run
 
@@ -181,7 +183,7 @@ It writes:
 nsh package [ENTRY] --target ios|ios-simulator|android|macos|linux|windows|gpui|web [-o <OUT>] [flags]
 ```
 
-Builds an installable app from the prebuilt runtime, in release mode. No Rust and no Xcode project or Gradle build are involved: NSH assembles the app bundle itself and uses Xcode's `actool` and `codesign` (iOS) or the SDK's `aapt2`, `zipalign` and `apksigner` (Android); for macOS it assembles an ad hoc signed `.app` with `codesign` (and `sips` for the icon); for Linux it copies the runner and writes a `.tar.gz` with `tar`; for Windows it copies the runner, embeds the icon and writes a `.zip`, with no tools; for GPUI it does what it does for this machine's OS, with the GPUI runner; for the web it writes a static site, with no tools. Metadata comes from `nsh.json`, overridden by the flags. A Rust app (`nsh.json` `"root"`) is packaged with its own runner, built with Rust from an NSH source checkout: no bundle and no QuickJS, its root mounted ([Building with Rust](./rust.md)).
+Builds an installable app from the prebuilt runtime, in release mode. No Rust and no Xcode project or Gradle build are involved: NSH assembles the app bundle itself and uses Xcode's `actool` and `codesign` (iOS) or the SDK's `aapt2`, `zipalign` and `apksigner` (Android); for macOS it assembles an ad hoc signed `.app` with `codesign` (and `sips` for the icon); for Linux it copies the runner and writes a `.tar.gz` with `tar`; for Windows it copies the runner, embeds the icon and writes a `.zip`, with no tools; for GPUI it does what it does for this machine's OS, with the GPUI runner; for the web it writes a static site, with no tools. Metadata comes from `nsh.json`, overridden by the flags. A Rust app (`nsh.json` `"root"`) is packaged with its own runner, built with Rust from NSH's crates: no bundle and no QuickJS, its root mounted ([Building with Rust](./rust.md)).
 
 | Flag | Description |
 |---|---|
@@ -244,6 +246,7 @@ Certifies a release key with a root key for some app ids and a time window; pack
 
 ```sh
 nsh publish [ENTRY] --key <KEY.secret> --cert <CERT> [-o <OUT>] [--id <ID>] [--app-version <V>] [--build <N>]
+            [--source-map package|file|none] [--strip-debug]
 ```
 
 Builds the app in release mode and signs it into a package. Metadata comes from `nsh.json`, overridden by the flags.
@@ -256,6 +259,8 @@ Builds the app in release mode and signs it into a package. Metadata comes from 
 | `--id <ID>` | App id. |
 | `--app-version <VERSION>` | Version. |
 | `--build <BUILD>` | Build number: must grow with every release. |
+| `--source-map <WHERE>` | Where the source map goes: `package` (default), `file` (`<package>.map` next to the package) or `none` ([Signed packages](./signed-packages.md#errors-from-published-packages)). |
+| `--strip-debug` | Leave the line and column tables out of the bytecode: smaller, but error stacks have no positions. |
 
 ### nsh verify
 
@@ -264,6 +269,16 @@ nsh verify <PACKAGE> [--root <ROOT.pub>]... [--revocations <LIST>]
 ```
 
 Verifies a package as an app trusting the given roots would. Without `--root`, only the package's own signature is checked. It prints the package's SHA-256, which `nsh revoke --package` takes.
+
+### nsh symbolicate
+
+```sh
+nsh symbolicate <MAP> [INPUT]
+```
+
+Rewrites the bundle positions (`bundle.js:LINE:COL`) of an error a package reported to your sources and prints the
+result. `MAP` is a source map (`<package>.map` from `nsh publish --source-map file`, `bundle.js.map`) or a package that
+holds one; `INPUT` is the error text (default: standard input).
 
 ### nsh revoke
 
@@ -287,6 +302,7 @@ Signs a revocation list: release keys and packages that must not load any more.
 | Variable | Used by | Description |
 |---|---|---|
 | `ANDROID_HOME`, `ANDROID_SDK_ROOT` | Android targets | The Android SDK. Fallback: `~/Library/Android/sdk`. |
+| `CARGO_TARGET_DIR` | apps with Rust crates | Where the app's runners build. Default: the app's `target/`. |
 | `NSH_KEYSTORE_PASSWORD` | `package --target android` | The keystore password. |
 | `NSH_RUNTIME` | `run`, `package` | A runtime directory to use instead of the one next to the CLI. |
 | `NSH_VERBOSE` | every command | `1`: as `--verbose`. |

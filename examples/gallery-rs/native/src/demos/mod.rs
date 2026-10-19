@@ -4,6 +4,7 @@ mod animations;
 mod canvas;
 mod chat;
 mod components;
+mod file_drop;
 mod form;
 mod gestures;
 mod images;
@@ -15,6 +16,7 @@ mod photos;
 mod physics;
 mod scrolling;
 mod stocks;
+mod storage;
 mod styles;
 mod system;
 mod text_demo;
@@ -131,6 +133,12 @@ pub(crate) static GROUPS: &[Group] = &[
         title: "Touch and motion",
         demos: &[
             Demo {
+                name: "File drops",
+                detail: "Desktop file URLs, destination entry and exit",
+                icon: IconName::Gestures,
+                content: || file_drop::FileDrop::element(()).into_element(),
+            },
+            Demo {
                 name: "Gestures",
                 detail: "Pinch, rotate, press states, hit slop, pointer events",
                 icon: IconName::Gestures,
@@ -211,6 +219,12 @@ pub(crate) static GROUPS: &[Group] = &[
                 detail: "Status bar, alerts, action sheets, environment, timers, HTTP",
                 icon: IconName::System,
                 content: || system::System::element(()).into_element(),
+            },
+            Demo {
+                name: "Storage",
+                detail: "Storage from Rust: a launch count, a note saved as you type, the stored keys",
+                icon: IconName::Storage,
+                content: || storage::StorageDemo::element(()).into_element(),
             },
         ],
     },

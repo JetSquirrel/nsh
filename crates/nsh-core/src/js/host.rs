@@ -41,9 +41,9 @@ pub trait HostInput: Sized {
     fn entries(&self) -> Vec<(String, Self)>;
     /// Truthy, as JS sees it.
     fn truthy(&self) -> bool;
-    /// The native animation node this value is (`NativeNode.__nv`).
-    fn native_node(&self) -> Option<nsh_animation::NodeId> {
-        self.field("__nv")
+    /// The native animation node this value is (`AnimatedNode.__av`).
+    fn animated_node(&self) -> Option<nsh_animation::NodeId> {
+        self.field("__av")
             .and_then(|v| v.as_number())
             .map(|n| n as nsh_animation::NodeId)
     }
@@ -390,6 +390,24 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         on::ALL,
         "() => void",
         "The mouse left the view and the views inside it, or the window (macOS and Linux).",
+    ),
+    (
+        EventKind::FileDragEnter,
+        on::ALL,
+        "() => void",
+        "A local file drag entered this desktop destination.",
+    ),
+    (
+        EventKind::FileDragLeave,
+        on::ALL,
+        "() => void",
+        "A local file drag left this desktop destination.",
+    ),
+    (
+        EventKind::FileDrop,
+        on::ALL,
+        "(e: { uris: string[] }) => void",
+        "Local file URLs dropped on this desktop destination.",
     ),
     (EventKind::Layout, on::ALL, "(e: LayoutEvent) => void", ""),
     (EventKind::PanStart, on::ALL, "(e: PanEvent) => void", ""),

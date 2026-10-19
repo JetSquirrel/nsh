@@ -108,9 +108,9 @@ server client, log forwarding, the error overlay: `dev.rs`). The runtime needs m
 - **Embedding**: `AppView` (`app.rs`) is one surface as a view; `run_app` opens one in a window with a standard menu
   (About, Hide, Quit; Edit's undo / redo / cut / copy / paste / select all, which fields answer; Minimize, Zoom, Enter
   Full Screen, Close), titled with `AppOptions::title`: `name_app` sets the main bundle's `CFBundleName` to it, as the
-  menu bar shows that (the development host has no bundle; `nsh run` passes it the app's name with `--name`). The app
-  ends when its window closes, a minimized one too (AppKit's `applicationShouldTerminateAfterLastWindowClosed:` skips
-  windows that are not on screen, so `windowWillClose:` terminates). `set_ui_sets`
+  menu bar shows that (the development host has no bundle; `nsh run` passes it the app's name with `--name`). The standalone event loop
+  ends when its window closes, a minimized one too; `windowWillClose:` schedules
+  its stop after the close callback. `set_ui_sets`
   replaces the default `nsh/ui/mobile` set for apps with Rust components of their own.
 
 ## How each area maps to AppKit
@@ -154,12 +154,12 @@ any layout; the dev host's Cmd+R is a local key monitor (`dev.rs`).
   `InputConfig::submit()` says; Shift+Return breaks the line of a multiline input that submits, and a return with
   marked text only commits the composition), Option+Return and Ctrl+Return (a `\n` in a multiline input, nothing in
   a single line; `insertLineBreak:` alone would insert U+2028), Option+Tab (a tab character in a multiline input
-  only), Tab / Shift+Tab / Ctrl+Tab (`tab`: the next field on screen within the newest modal, skipping the clip view
+  only), Tab / Shift+Tab / Ctrl+Tab (`tab`: the next field or pressable view on screen within the newest modal, skipping the clip view
   of a text view, which hands the focus back to it) and Escape (leaves the field). Keys a field uses never reach the
   root, so Option+Left moves the caret and Cmd+[ does nothing there.
 - **At the root** (`view.rs` `keyDown:` → `input::key`): the selected text's Cmd+A / Cmd+C / Escape (`text.rs`;
   also the root's `selectAll:` / `copy:` for the menu), going back (`navigation::key_pressed`: Escape, Option+Left,
-  Cmd+[), Tab / Shift+Tab into the fields, and scrolling the scroll view around the focused view or under the mouse:
+  Cmd+[), Tab / Shift+Tab into fields and pressable views, and scrolling the scroll view around the focused view or under the mouse:
   arrows by a line, Page Up / Down, Option+Up / Down and Space / Shift+Space by a page, Home / End and Cmd+Up / Down
   to the edges. The mouse's back button goes back from `input::event`.
 - **The app's shortcuts** (`nsh/keymap`, `keymap.rs`): while the surface has bindings, a local key-down monitor
@@ -244,3 +244,62 @@ so are outer box shadows under an opaque background (unmasked `shadowPath` caste
 - **Accessibility**: `accessibilityActions`.
 - **No desktop equivalent**: the status bar, haptics; the safe area and keyboard height are 0.
 - **Packaged apps** are signed ad hoc; to distribute one, sign it with a Developer ID and notarize it.
+
+## Standalone shutdown
+
+`run_app` owns the standalone window and engine, while its caller owns process
+termination. Closing the window (including a minimized window) stops the engine
+and stops the AppKit event loop. Quit follows the same path through
+`applicationShouldTerminate:`: the delegate cancels AppKit's process exit and
+returns control through `run_app` instead. The helper posts an application-defined
+event after `stop:` so a dispatch-driven close wakes the event loop.
+
+This lets a Rust host perform final cleanup or execute an installed update after
+`run_app` returns. Embedded `AppView` instances continue to use their host's
+delegate and event loop. This change still needs native close, minimized-close,
+Command-Q, script quit, process-exit status and relaunch validation. No tests
+were run for this change at the user's request.
+
+### Retained standalone session design
+
+A standalone host chooses its close policy through
+`AppOptions::keep_alive_on_close` (default false). With retention enabled, the
+close delegate orders out the existing window and declines its destruction.
+`RUNNING` continues owning the same window, AppView and engine. Dock reopen
+orders that window front; it creates neither another engine nor another session.
+
+Explicit application Quit and `quit_app()` always take the stop-and-return
+path, including while the window is hidden. `quit_app()` dispatches to the main
+thread and only affects the standalone runner; an embedded host retains its own
+application lifecycle. The Rust core's `close_window()` remains a window-close
+request, so hosts using retention must use `quit_app()` for Exit/relaunch.
+
+Acceptance requires visible/hidden/minimized close, Dock reopen preserving
+state and transfers, repeated reopen without duplicate windows, Quit while
+hidden, scripted quit, and cleanup after run_app returns. Source implementation
+and CI compilation alone do not prove those runtime behaviors.
+
+## Keyboard focus for pressable views
+
+A mounted non-input view listening to `onPress` participates in AppKit's key
+view loop alongside native text inputs. Disabled accessibility state, removed
+press listeners, hidden views and views leaving the tree exclude a control.
+Tab/Shift+Tab stay within the newest modal and advance from the currently
+focused control. The root and passive layout views stay outside that loop.
+
+Focused controls update the existing `focus:` interaction state. Unmodified
+Return, keypad Enter and Space emit PressIn/PressOut/Press once on key-down;
+auto-repeat and key-up are consumed without another activation. App keymap
+monitors let those activation keys reach the control instead of triggering a
+global Enter/Space binding. Modifier shortcuts keep their existing priority.
+Accessibility focus also moves keyboard focus for pressable views.
+
+Only root views retain a surface reference. A focused child's keyboard callbacks
+resolve its surface through ancestors; pointer and drawing callbacks keep their
+existing root-only lookup. This avoids attaching per-button monitors or changing
+the public event protocol.
+
+No builds or tests were run for this change at the user's request. Native
+acceptance remains pending: mixed input/button traversal in both directions,
+modal isolation and restoration, disabling/deleting a focused control, repeat
+suppression, modifier shortcuts, screen-reader focus and window deactivation.
